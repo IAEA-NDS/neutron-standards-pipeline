@@ -1,3 +1,6 @@
 [submodule "neutron-standards-evaluation"]
 	path = neutron-standards-evaluation
 	url = ../neutron-standards-evaluation/
+[submodule "datpy"]
+	path = datpy
+	url = ../../Development/codeproj/gitrepos/DATP-Python/
