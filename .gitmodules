@@ -1,0 +1,3 @@
+[submodule "neutron-standards-evaluation"]
+	path = neutron-standards-evaluation
+	url = ../neutron-standards-evaluation/
