@@ -164,6 +164,7 @@ def update_database(database, database_update):
         if new_datasets:
             blck['datasets'] = new_datasets
             new_datablocks.append(blck)
+    gmadb['prior'] = database_update['prior']
     gmadb['datablocks'] = new_datablocks
 
 
