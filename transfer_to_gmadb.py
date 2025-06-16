@@ -1,6 +1,7 @@
 import datpy.data_io.json as json
 import numpy as np
 from pathlib import Path
+import argparse
 
 # convenience
 
@@ -22,12 +23,22 @@ def get_dataset_index(database):
 
 # simple checks 
 
+def is_sacs(ds):
+    if ds.get('MT') in (6,10):
+        return True
+    if ds.get('quantity','') in ('legacy_sacs', 'legacy_sacs_ratio'):
+        return True
+    return False
+
+
 def is_rrr_fit(ds):
-    full_label = (ds['CLABL'] + ds['BREF']).replace(' ', '')
+    full_label = (ds.get('CLABL','') + ds.get('BREF','')).replace(' ', '')
     return any(s in full_label for s in ('Hale', 'Chen', 'EDA', 'RAC', 'Derrien'))
 
 
 def is_tnc_data(ds):
+    if 'E' not in ds:
+        return False
     return len(ds['E']) == 1 and ds['E'][0] == 2.53e-8
 
 
@@ -121,7 +132,7 @@ def save_database(database, database_file):
 
 
 def perform_dataset_action(ds, prior_index, dataset_index):
-    dataset_id = ds['NS']
+    dataset_id = ds['NS'] if 'NS' in ds else ds['identifier']
     ds_upd = dataset_index.get(dataset_id)
     if ds_upd is not None:
         modify_dataset(ds, ds_upd)
@@ -129,6 +140,8 @@ def perform_dataset_action(ds, prior_index, dataset_index):
         deal_with_rrr_fit(ds, prior_index)
     elif is_tnc_data(ds):
         print(f'dataset {dataset_id} with MT={ds["MT"]} is a TNC dataset (hence no reduction update available and not necessary)')
+    elif is_sacs(ds):
+        print(f'keeping SACS dataset {dataset_id} as is') 
     else:
         deal_with_mysterious_dataset(ds)
         return False
@@ -154,14 +167,19 @@ def update_database(database, database_update):
     gmadb['datablocks'] = new_datablocks
 
 
-gmadb_file = Path('input') / 'data2017.json' 
-reddb_file = Path('input') / 'upd_reduced.json'
-outdb_file = Path('input') / 'upd_data.json'
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gma-database', type=str, help='path to GMA database file')
+    parser.add_argument('--reduced-input', type=str, help='path to reduced input (result of datpy invocation)')
+    parser.add_argument('--gma-database-out', type=str, help='output file with update gma database')
+    args = parser.parse_args()
 
-gmadb = read_database(gmadb_file)
-reddb = read_database(reddb_file)
+    gmadb_file = args.gma_database
+    reddb_file = args.reduced_input
+    outdb_file = args.gma_database_out
 
-update_database(gmadb, reddb)
+    gmadb = read_database(gmadb_file)
+    reddb = read_database(reddb_file)
+    update_database(gmadb, reddb)
 
-save_database(gmadb, outdb_file) 
-
+    save_database(gmadb, outdb_file) 
