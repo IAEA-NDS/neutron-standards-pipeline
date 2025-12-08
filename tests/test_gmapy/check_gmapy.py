@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 from helpers import (
     read_gma_result,
-    evaluate_gma_database,
     evaluate_gma_database2,
 )
 from gmapy.mappings.priortools import (
@@ -15,6 +14,7 @@ from gmapy.legacy.legacy_gmap import run_gmap as run_gmap_legacy
 from gmapy.data_management.tablefuns import (
     create_experiment_table,
 )
+from gmapy.tf_uq.gmap_tf import evaluate_gma_database as evaluate_gma
 
 input_path = Path('input')
 
@@ -161,21 +161,38 @@ gmadb = read_gma_database(input_path / 'DAT_NEW.JSON')
 remove_dummy_datasets(gmadb['datablock_list'])
 exptable = create_experiment_table(gmadb['datablock_list'])
 
-gmapy_res2_raw = evaluate_gma_database2(
+# gmapy_res2_raw = evaluate_gma_database2(
+#     gmadb['prior_list'], gmadb['datablock_list'],
+#     rel_tol=1e-40, max_iters=3, remove_dummy=True, mt6_ppp=False,
+#     rel_damp_unc=np.sqrt(1e4),
+# )
+gmapy_res2_raw = evaluate_gma(
     gmadb['prior_list'], gmadb['datablock_list'],
-    rel_tol=1e-40, max_iters=3, remove_dummy=True, mt6_ppp=False,
-    rel_damp_unc=np.sqrt(1e4),
+    remove_dummy=True, mt6_ppp=False,
+    optim_type='iterative-gls',
+    optim_opts = {
+        'max_iters': 3, 'rel_tol': 1e-40, 'rel_damp_unc': np.sqrt(1e4), 'must_converge': False,
+    }
 )
+
+# gmapy_res2_raw = evaluate_gma(
+#     gmadb['prior_list'], gmadb['datablock_list'],
+#     remove_dummy=True, mt6_ppp=False, relative=True,
+#     optim_type='chisquare',
+#     optim_opts = {
+#         'max_inner_iters': 1000, 'max_outer_iters': 100, 'nugget': 1e-5, 'must_converge': True
+#     }
+# )
 
 df1 = gmapy_res1_raw['table'].copy()
 df1 = df1[df1.NODE.str.match('^xsid_|^norm_')].reset_index(drop=True)
 
-df2 = gmapy_res2_raw.copy()
+df2 = gmapy_res2_raw['table'].copy()
 df2 = df2[df2.NODE != 'fis'].reset_index(drop=True)
 
 (df1.NODE == df2.NODE).all()
 (df1.ENERGY == df2.ENERGY).all()
-np.allclose(df1.POST, df2.RESULT)
+np.allclose(df1.POST, df2.POST)
 
 # Check passed -> Simplified GMA approach yields same result
 #                 as TensorFlow approach
