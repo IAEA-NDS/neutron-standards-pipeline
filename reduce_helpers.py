@@ -10,9 +10,6 @@ from gmapy.data_management.tablefuns import (
 from gmapy.data_management.uncfuns import (
     create_experimental_covmat,
 )
-from gmapy.data_management.uncfuns import (
-    create_experimental_covmat,
-)
 
 
 def prepare_experiment_info(gmadb, expvals=None, expcov_list=None): 
@@ -90,6 +87,16 @@ def create_cov_linop_fun(expcov_list):
         )
         return expcov_linop
     return cov_linop_fun
+
+
+def create_cov_chol_op(expcov_list):
+    expchol_list = [tf.linalg.cholesky(x) for x in expcov_list]
+    expchol_op_list = [tf.linalg.LinearOperatorLowerTriangular(
+            x, is_non_singular=True, is_square=True
+        ) for x in expchol_list]
+    expcov_chol = tf.linalg.LinearOperatorBlockDiag(
+        expchol_op_list, is_non_singular=True, is_square=True)
+    return expcov_chol
 
 
 def update_unreduced_gmadb_prior(gmadb, priortable, is_adj, newvals):
