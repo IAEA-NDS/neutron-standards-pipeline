@@ -4,3 +4,6 @@
 [submodule "datpy"]
 	path = deps/datpy
 	url = ../../Development/codeproj/gitrepos/DATP-Python/
+[submodule "deps/datp-fortran"]
+	path = deps/datp-fortran
+	url = https://github.com/iaea-nds/datp-fortran
