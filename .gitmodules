@@ -7,3 +7,6 @@
 [submodule "deps/datp-fortran"]
 	path = deps/datp-fortran
 	url = https://github.com/iaea-nds/datp-fortran
+[submodule "deps/gmap-fortran"]
+	path = deps/gmap-fortran
+	url = https://github.com/iaea-nds/gmap-fortran
