@@ -1,141 +1,426 @@
 import json
-import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-import tensorflow as tf
-from copy import deepcopy
-from datpy.datpy import (
-    reduce_database
-)
-from gmapy.mappings.tf.restricted_map import RestrictedMap
-from gmapy.data_management.tablefuns import (
-    create_prior_table,
-)
-from gmapy.mappings.tf.compound_map_tf import (
-    CompoundMap as CompoundMapTF,
-)
-from gmapy.data_management.uncfuns import (
-    create_prior_covmat
-)
-from gmapy.tf_uq.custom_distributions import (
-    MultivariateNormalLikelihoodWithCovParams,
-)
-from gmapy.mappings.priortools import (
-    remove_dummy_datasets,
-    attach_shape_prior,
-    initialize_shape_prior,
-)
-from gmapy.tf_uq.inference import iterative_gls_estimate
-from reduce_helpers import (
-    prepare_experiment_info,
-    create_cov_linop_fun,
-    update_unreduced_gmadb_prior,
-    reduce_database_iteratively,
-)
+from gmapy.data_management.database_IO import read_gma_database
+from gmapy.legacy.data_extraction_functions import read_gma_result
+from gmapy.legacy.legacy_gmap import run_gmap as run_legacy_gmap
+from gmapy.tf_uq.gmap_tf import evaluate_gma_database
+from gmapy.tf_uq.reduction_tf import reduce_database_iteratively
+from gmapy.gmap import run_gmap_simplified
+from pathlib import Path
+import sys
+sys.path.insert(0, 'input/std2017/approach0')
+from run_approach import run_fortran_pipeline
 
 
-with open('input/full_input.json') as f:
-    orig_gmadb = json.load(f)
+# ------------------------------------------------------------
+# Perform reduction and evaluation with Fortran legacy codes 
+# ------------------------------------------------------------
 
-remove_dummy_datasets(orig_gmadb['datablocks'])
+run_fortran_pipeline('input/std2017/approach0')
+legacy_result_df = read_gma_result('input/std2017/approach0/04_evaluation/gma.res')
 
-############################################################
-#   INITIAL REDUCTION FOR BUILDING THE STATISTICAL MODEL
-###########################################################
+# ------------------------------------------------------------
+# 1) Perform reduction with legacy code
+# but perform evaluation with Python legacy mode 
+# ------------------------------------------------------------
 
-new_gmadb = reduce_database(orig_gmadb)
-
-############################################################
-#   BUILD THE STATISTICAL MODEL
-###########################################################
-
-priortable = create_prior_table(new_gmadb['prior'])
-priorcov = create_prior_covmat(new_gmadb['prior'])
-exptable, expvals, expcov_list = prepare_experiment_info(new_gmadb)
-
-# build the covariance linear operator fun
-cov_linop_fun = create_cov_linop_fun(expcov_list)
-
-# construct priortable and mapping to experimental data
-priortable, priorcov = attach_shape_prior((priortable, exptable), covmat=priorcov, raise_if_exists=False)
-compmap = CompoundMapTF((priortable, exptable), reduce=True)
-initialize_shape_prior((priortable, exptable), compmap)
-
-# some convenient shortcuts
-is_adj = priorcov.diagonal() != 0.
-priorvals = priortable.PRIOR.to_numpy()
-
-# define model propagation and jacobian function
-adj_idcs = np.where(is_adj)[0]
-fixed_idcs = np.where(~is_adj)[0]
-restrimap = RestrictedMap(
-    len(priorvals), compmap.propagate, compmap.jacobian,
-    fixed_params=priorvals[fixed_idcs], fixed_params_idcs=fixed_idcs
+# We do the final evaluation with the legacy mode of gmapy 
+legacy_mode_result = run_legacy_gmap(
+    'input/std2017/approach0/04_evaluation/data.gma', dbtype='legacy', num_iter=3, remove_dummy=False,
+    correct_ppp=True, fix_ppp_bug=False, fix_sacs_jacobian=False, legacy_integration=True,
 )
 
-# define the start values
-likelihood = MultivariateNormalLikelihoodWithCovParams(
-    len(adj_idcs), 0, restrimap.propagate, restrimap.jacobian, expvals, cov_linop_fun, approximate_hessian=True, relative=True
+df1 = legacy_mode_result['table'] 
+df1 = df1[df1.NODE.str.match('^xsid_')].reset_index(drop=True)
+
+assert (df1.NODE == legacy_result_df.NODE).all()
+assert (df1.ENERGY == legacy_result_df.ENERGY).all()
+np.allclose(df1.POST, legacy_result_df.RESULT)
+df1['FORTRAN_POST'] = legacy_result_df.RESULT
+df1['RELDIFF'] = np.abs((df1['POST'] - df1['FORTRAN_POST']) / df1['POST'])
+
+with pd.ExcelWriter('sheets/scenario_01.xlsx') as writer:
+    df1[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'RELDIFF']].to_excel(writer, index=False)
+
+# ------------------------------------------------------------
+# 2) Perform reduction with Python datpy code
+# and perform evaluation with Python legacy mode 
+# ------------------------------------------------------------
+
+legacy_mode_result_from_json_db = run_legacy_gmap(
+    'input/std2017/approach0/04_evaluation/data.json', dbtype='json', num_iter=3, remove_dummy=False,
+    correct_ppp=True, fix_ppp_bug=False, fix_sacs_jacobian=False, legacy_integration=True,
 )
 
-# functions used by optimization routine
-propfun = tf.function(likelihood.get_model_prediction)
-jacfun = tf.function(likelihood.get_model_jacobian)
-cov_linop_fun = tf.function(likelihood.get_covariance_linop)
+df2 = legacy_mode_result_from_json_db['table'] 
+df2 = df2[df2.NODE.str.match('^xsid_')].reset_index(drop=True)
 
-# Loop over the following stages
+assert (df2.NODE == legacy_result_df.NODE).all()
+assert (df2.ENERGY == legacy_result_df.ENERGY).all()
+np.allclose(df2.POST, legacy_result_df.RESULT)
 
-startvals = tf.constant(priorvals[is_adj], dtype=tf.float64)
+df2['FORTRAN_POST'] = legacy_result_df['RESULT']
+df2['RELDIFF'] = np.abs((df2['POST'] - df2['FORTRAN_POST'])  / df2['POST'])
+np.where(df2['RELDIFF'] == np.max(df2['RELDIFF']))
+df2.loc[176]
+df2.sort_values('RELDIFF')
 
-optim_func = lambda x: iterative_gls_estimate(
-    x, propfun, jacfun, expvals, cov_linop_fun,
-    ret_optres=True, max_iters=300, rel_tol=1e-6, rel_damp_unc=1000
+with pd.ExcelWriter('sheets/scenario_02.xlsx') as writer:
+    df2[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 3) Perform reduction with Python datpy code
+# and perform evaluation with Python legacy mode
+#   - without bugs
+# ------------------------------------------------------------
+
+legacy_mode_result_from_json_db = run_legacy_gmap(
+    'input/std2017/approach0/04_evaluation/data.json', dbtype='json', num_iter=3, remove_dummy=False,
+    correct_ppp=True, fix_ppp_bug=True, fix_sacs_jacobian=True, legacy_integration=False,
 )
 
-# Optimize in several stages. Only done for comparing convergence visually.
+df3 = legacy_mode_result_from_json_db['table'] 
+df3 = df3[df3.NODE.str.match('^xsid_')].reset_index(drop=True)
 
-orig_gmadb1, new_gmadb1 = reduce_database_iteratively(
-    startvals, optim_func, priortable, is_adj, orig_gmadb, new_gmadb,
-    expvals, expcov_list, max_iters=3, rel_tol=1e-6
+assert (df3.NODE == legacy_result_df.NODE).all()
+assert (df3.ENERGY == legacy_result_df.ENERGY).all()
+np.allclose(df3.POST, legacy_result_df.RESULT)
+
+df3['FORTRAN_POST'] = legacy_result_df['RESULT']
+df3['RELDIFF'] = np.abs((df3['POST'] - df3['FORTRAN_POST'])  / df3['POST'])
+
+with pd.ExcelWriter('sheets/scenario_03.xlsx') as writer:
+    df3[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 4) Perform reduction with Python datpy code
+# and perform evaluation with modern Python mode
+# (equivalent to Python legacy mode without bugs)
+# ------------------------------------------------------------
+
+modern_mode_result_from_json_db = run_gmap_simplified(
+    dbfile='input/std2017/approach0/04_evaluation/data.json', dbtype='json',
+    num_iter=3, correct_ppp=True, remove_dummy=False
 )
 
-orig_gmadb2, new_gmadb2 = reduce_database_iteratively(
-    startvals, optim_func, priortable, is_adj, orig_gmadb1, new_gmadb1,
-    expvals, expcov_list, max_iters=3, rel_tol=1e-6
+df4 = legacy_mode_result_from_json_db['table']
+df4 = df4[df4.NODE.str.match('^xsid_')].reset_index(drop=True)
+
+assert (df4.NODE == df3.NODE).all()
+assert (df4.ENERGY == df3.ENERGY).all()
+assert np.allclose(df4.POST, df3.POST, rtol=1e-10)
+
+df4['PY_LEGACY_POST'] = df3['POST']
+df4['RELDIFF'] = np.abs((df4['POST'] - df4['PY_LEGACY_POST'])  / df4['POST'])
+
+with pd.ExcelWriter('sheets/scenario_04.xlsx') as writer:
+    df4[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'PY_LEGACY_POST', 'RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 5) Perform reduction with Python datpy code
+# and perform evaluation with modern Python mode
+#   - more iterations
+# ------------------------------------------------------------
+
+modern_mode_result_from_json_db = run_gmap_simplified(
+    dbfile='input/std2017/approach0/04_evaluation/data.json', dbtype='json',
+    num_iter=10, correct_ppp=True, remove_dummy=False
 )
 
-orig_gmadb3, new_gmadb3 = reduce_database_iteratively(
-    startvals, optim_func, priortable, is_adj, orig_gmadb2, new_gmadb2,
-    expvals, expcov_list, max_iters=3, rel_tol=1e-6
+df5 = modern_mode_result_from_json_db['table']
+df5 = df5[df5.NODE.str.match('^xsid_')].reset_index(drop=True)
+np.allclose(df5['POST'], df4['POST'], rtol=1e-4)
+
+df5['POST4'] = df4['POST']
+df5['RELDIFF'] = np.abs((df5['POST'] - df5['POST4'])  / df4['POST'])
+
+with pd.ExcelWriter('sheets/scenario_05.xlsx') as writer:
+    df5[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'POST4', 'RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 6) Perform reduction with Python datpy code
+# and perform evaluation with modern Python mode
+#   - more iterations
+#   - remove dummy data
+#   - alternative regularization scheme
+# ------------------------------------------------------------
+
+modern_mode_result_from_json_db = run_gmap_simplified(
+    dbfile='input/std2017/approach0/04_evaluation/data.json', dbtype='json',
+    num_iter=10, correct_ppp=True, remove_dummy=True, reg=1e-6
 )
 
+df6 = modern_mode_result_from_json_db['table']
+df6 = df6[df6.NODE.str.match('^xsid_')].reset_index(drop=True)
 
-for xsid in range(10): 
-    # prepare early stopping result
-    cur_prior1 = new_gmadb['prior'][xsid]
-    cur_ens1 = cur_prior1['EN']
-    cur_xs1 = cur_prior1['CS']
-    cur_prior_df1 = pd.DataFrame({'EN': cur_ens1, 'CS': cur_xs1})
-    cur_prior_df1 = cur_prior_df1.query('EN >= 0.1 & EN <= 20')
-    # prepare intermediate stopping result
-    cur_prior2 = new_gmadb2['prior'][xsid]
-    cur_ens2 = cur_prior2['EN']
-    cur_xs2 = cur_prior2['CS']
-    cur_prior_df2 = pd.DataFrame({'EN': cur_ens2, 'CS': cur_xs2})
-    cur_prior_df2 = cur_prior_df2.query('EN >= 0.1 & EN <= 20')
-    # prepare late stopping result
-    cur_prior3 = new_gmadb3['prior'][xsid]
-    cur_ens3 = cur_prior3['EN']
-    cur_xs3 = cur_prior3['CS']
-    cur_prior_df3 = pd.DataFrame({'EN': cur_ens3, 'CS': cur_xs3})
-    cur_prior_df3 = cur_prior_df3.query('EN >= 0.1 & EN <= 20')
-    # some sanity checks
-    assert cur_prior1['CLAB'] == cur_prior2['CLAB']
-    assert cur_prior2['CLAB'] == cur_prior3['CLAB']
-    # plot the results
-    plt.plot(cur_prior_df1.EN, cur_prior_df1.CS)
-    plt.plot(cur_prior_df2.EN, cur_prior_df2.CS)
-    plt.plot(cur_prior_df3.EN, cur_prior_df3.CS)
-    plt.title(cur_prior1['CLAB'])
-    plt.show()
+assert (df6.NODE == df5.NODE).all()
+assert (df6.ENERGY == df5.ENERGY).all()
+df6['POST5'] = df5['POST']
+df6['RELDIFF'] = np.abs((df6['POST'] - df6['POST5']) / df6['POST'])
+
+with pd.ExcelWriter('sheets/scenario_06.xlsx') as writer:
+    df6[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'POST5', 'RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 7) Perform reduction with Python datpy code
+# and perform evaluation with gmapy tensorflow mode
+#   - more iterations
+#   - remove dummy data
+#   - alternative regularization scheme
+# ------------------------------------------------------------
+
+gma_db = read_gma_database('input/std2017/approach0/04_evaluation/data.json')
+tf_result = evaluate_gma_database(gma_db['prior_list'], gma_db['datablock_list'], remove_dummy=True, optim_opts={'max_iters':10, 'rel_tol': 1e-8})
+
+df7 = tf_result['table']
+df7 = df7[df7.NODE.str.match('^xsid_')].reset_index(drop=True)
+
+assert (df7.NODE == df6.NODE).all()
+assert (df7.ENERGY == df6.ENERGY).all()
+assert np.allclose(df7.POST, df6.POST) 
+
+df7['POST6'] = df6['POST']
+df7['RELDIFF'] = np.abs((df7['POST'] - df7['POST6']) / df7['POST'])
+df7['FORTRAN_POST'] = legacy_result_df.RESULT
+df7['FORTRAN_RELDIFF'] = np.abs((df7['POST'] - df7['FORTRAN_POST']) / df1['POST'])
+
+with pd.ExcelWriter('sheets/scenario_07.xlsx') as writer:
+    df7[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'POST6', 'RELDIFF', 'FORTRAN_POST', 'FORTRAN_RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 8) Perform reduction with Python datpy code
+# and perform evaluation with gmapy tensorflow mode
+#   - more iterations
+#   - remove dummy data
+#   - chisquare minimization instead of GLS
+# ------------------------------------------------------------
+
+gma_db = read_gma_database('input/std2017/approach0/04_evaluation/data.json')
+tf_result = evaluate_gma_database(
+    gma_db['prior_list'], gma_db['datablock_list'], remove_dummy=True,
+    optim_type='chisquare', optim_opts={
+        'max_inner_iters': 1000, 'max_outer_iters': 20,
+    }
+)
+
+df8 = tf_result['table']
+df8 = df8[df8.NODE.str.match('^xsid_')].reset_index(drop=True)
+
+assert (df8.NODE == df7.NODE).all()
+assert (df8.ENERGY == df7.ENERGY).all()
+assert np.allclose(df8.POST, df7.POST) 
+
+df8['POST7'] = df7['POST'] 
+df8['RELDIFF'] = np.abs((df8.POST - df8.POST7) / df8.POST) 
+df8['FORTRAN_POST'] = legacy_result_df.RESULT
+df8['FORTRAN_RELDIFF'] = np.abs((df8['POST'] - df8['FORTRAN_POST']) / df8['POST'])
+
+with pd.ExcelWriter('sheets/scenario_08.xlsx') as writer:
+    df8[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'POST7', 'RELDIFF', 'FORTRAN_POST', 'FORTRAN_RELDIFF']].to_excel(writer, index=False)
+
+
+# Change condition to `True` for small ad-hoc test
+# that we indeed found a chisquare minimum
+if False:
+    def get_chisq(x):
+        C = tf_result['likelihood'].get_covariance_linop(x).to_dense().numpy()
+        y = tf_result['likelihood'].get_model_prediction(x).numpy()
+        e = tf_result['expvals'].numpy()
+        d = (e-y).reshape(-1,1)
+        chisq = d.T @ np.linalg.solve(C, d) 
+        return chisq.item()
+
+    def is_max_chisq(x, i, chisq_ref):
+        x1 = x.copy()
+        x1[i] *= 1+1e-4
+        chisq1 = get_chisq(x1)
+        x2 = x.copy()
+        x2[i] *= 1-1e-4
+        chisq2 = get_chisq(x2)
+        return chisq1 > chisq_ref and chisq2 > chisq_ref
+
+    # check if indeed chisquare was minimized
+    x_ref = tf.constant(df.loc[df.NODE != 'fis', 'POST'], dtype=tf.float64).numpy()
+    chisq_ref = get_chisq(x_ref)
+    for i in range(0, 1127, 10): 
+        is_good = is_max_chisq(x_ref, 10, chisq_ref)
+        print(f'i: {i} - is_good: {is_good}')
+
+
+C = tf_result['likelihood'].get_covariance_linop(optres).to_dense().numpy()
+
+# ------------------------------------------------------------
+# 9) Perform reduction with Python datpy code
+# and perform evaluation with gmapy tensorflow mode
+#   - more iterations
+#   - remove dummy data
+#   - Maximum Likelihood Estimation (MLE)
+# ------------------------------------------------------------
+
+gma_db = read_gma_database('input/std2017/approach0/04_evaluation/data.json')
+tf_result = evaluate_gma_database(
+    gma_db['prior_list'], gma_db['datablock_list'], remove_dummy=True,
+    optim_type='mle', optim_opts={
+        'max_inner_iters': 1000, 'max_outer_iters': 20,
+    }
+)
+
+df9 = tf_result['table']
+df9 = df9[df9.NODE.str.match('^xsid_')].reset_index(drop=True)
+df9['FORTRAN_POST'] = legacy_result_df.RESULT
+df9['FORTRAN_RELDIFF'] = np.abs((df9['POST'] - df9['FORTRAN_POST']) / df9['POST'])
+
+with pd.ExcelWriter('sheets/scenario_09.xlsx') as writer:
+    df9[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'FORTRAN_RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 10) Perform iterative reduction with Python TensorFlow code 
+# and perform evaluation with gmapy tensorflow mode
+#   - iterative GLS approach
+#   - one iteration only
+# ------------------------------------------------------------
+
+with open('input/std2017/approach0/01_reduction/gmdata.json', 'r') as f: 
+    unred_gmadb = json.load(f)  
+
+tf_reduction_result = reduce_database_iteratively(
+    unred_gmadb, max_iters=1, rel_tol=1e-6, remove_dummy=True, optim_type='iterative-gls', 
+    optim_opts={'max_iters':30, 'rel_tol': 1e-8}
+)
+
+gma_db = tf_reduction_result['new_gmadb']
+tf_result = evaluate_gma_database(gma_db['prior'], gma_db['datablocks'], remove_dummy=True, optim_opts={'max_iters':10, 'rel_tol': 1e-8})
+
+df10 = tf_result['table']
+df10 = df10[df10.NODE.str.match('^xsid_')].reset_index(drop=True)
+df10['FORTRAN_POST'] = legacy_result_df.RESULT
+df10['FORTRAN_RELDIFF'] = np.abs((df10['POST'] - df10['FORTRAN_POST']) / df10['POST'])
+
+with pd.ExcelWriter('sheets/scenario_10.xlsx') as writer:
+    df10[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'FORTRAN_RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 11) Perform iterative reduction with Python TensorFlow code 
+# and perform evaluation with gmapy tensorflow mode
+#   - iterative GLS approach
+#   - several iterations (5)
+# ------------------------------------------------------------
+
+with open('input/std2017/approach0/01_reduction/gmdata.json', 'r') as f: 
+    unred_gmadb = json.load(f)  
+
+tf_reduction_result = reduce_database_iteratively(
+    unred_gmadb, max_iters=5, rel_tol=1e-6, remove_dummy=True, optim_type='iterative-gls', 
+    optim_opts={'max_iters':30, 'rel_tol': 1e-8}
+)
+
+gma_db = tf_reduction_result['new_gmadb']
+tf_result = evaluate_gma_database(
+    gma_db['prior'], gma_db['datablocks'], remove_dummy=True,
+    optim_type='iterative-gls', optim_opts={'max_iters':30, 'rel_tol': 1e-8}
+)
+
+df11 = tf_result['table']
+df11 = df11[df11.NODE.str.match('^xsid_')].reset_index(drop=True)
+df11['FORTRAN_POST'] = legacy_result_df.RESULT
+df11['FORTRAN_RELDIFF'] = np.abs((df11['POST'] - df11['FORTRAN_POST']) / df11['POST'])
+
+with pd.ExcelWriter('sheets/scenario_11.xlsx') as writer:
+    df11[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'FORTRAN_RELDIFF']].to_excel(writer, index=False)
+
+# ------------------------------------------------------------
+# 12) Perform iterative reduction with Python TensorFlow code 
+# and perform evaluation with gmapy tensorflow mode
+#   - iterative GLS approach
+#   - several iterations (10)
+# ------------------------------------------------------------
+
+with open('input/std2017/approach0/01_reduction/gmdata.json', 'r') as f: 
+    unred_gmadb = json.load(f)  
+
+tf_reduction_result = reduce_database_iteratively(
+    unred_gmadb, max_iters=10, rel_tol=1e-6, remove_dummy=True, optim_type='iterative-gls', 
+    optim_opts={'max_iters':100, 'rel_tol': 1e-8}
+)
+
+gma_db = tf_reduction_result['new_gmadb']
+tf_result = evaluate_gma_database(
+    gma_db['prior'], gma_db['datablocks'], remove_dummy=True,
+    optim_type='iterative-gls', optim_opts={'max_iters':100, 'rel_tol': 1e-8})
+
+df12 = tf_result['table']
+df12 = df12[df12.NODE.str.match('^xsid_')].reset_index(drop=True)
+df12['FORTRAN_POST'] = legacy_result_df.RESULT
+df12['FORTRAN_RELDIFF'] = np.abs((df12['POST'] - df12['FORTRAN_POST']) / df12['POST'])
+
+with pd.ExcelWriter('sheets/scenario_12.xlsx') as writer:
+    df12[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'FORTRAN_RELDIFF']].to_excel(writer, index=False)
+
+
+# ------------------------------------------------------------
+# 13) Perform iterative reduction with Python TensorFlow code 
+# and perform evaluation with gmapy tensorflow mode
+#   - chisquare approach
+#   - one iteration
+# ------------------------------------------------------------
+
+with open('input/std2017/approach0/01_reduction/gmdata.json', 'r') as f: 
+    unred_gmadb = json.load(f)  
+
+tf_reduction_result = reduce_database_iteratively(
+    unred_gmadb, max_iters=1, rel_tol=1e-6, remove_dummy=True,
+    optim_type='chisquare', optim_opts={'max_inner_iters':1000, 'max_outer_iters': 30}
+)
+
+gma_db = tf_reduction_result['new_gmadb']
+tf_result = evaluate_gma_database(
+    gma_db['prior'], gma_db['datablocks'], remove_dummy=True,
+    optim_type='chisquare', optim_opts={'max_inner_iters':1000, 'max_outer_iters': 30}
+)
+
+df13 = tf_result['table']
+df13 = df13[df13.NODE.str.match('^xsid_')].reset_index(drop=True)
+df13['FORTRAN_POST'] = legacy_result_df.RESULT
+df13['FORTRAN_RELDIFF'] = np.abs((df13['POST'] - df13['FORTRAN_POST']) / df13['POST'])
+
+with pd.ExcelWriter('sheets/scenario_13.xlsx') as writer:
+    df13[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'FORTRAN_RELDIFF']].to_excel(writer, index=False)
+
+# ------------------------------------------------------------
+# 14) Perform iterative reduction with Python TensorFlow code 
+# and perform evaluation with gmapy tensorflow mode
+#   - Maximum Likelihood Estimation
+#   - one iteration
+# ------------------------------------------------------------
+
+with open('input/std2017/approach0/01_reduction/gmdata.json', 'r') as f: 
+    unred_gmadb = json.load(f)  
+
+tf_reduction_result = reduce_database_iteratively(
+    unred_gmadb, max_iters=1, rel_tol=1e-6, remove_dummy=True,
+    optim_type='mle', optim_opts={'max_inner_iters':1000, 'max_outer_iters': 30}
+)
+
+gma_db = tf_reduction_result['new_gmadb']
+tf_result = evaluate_gma_database(
+    gma_db['prior'], gma_db['datablocks'], remove_dummy=True,
+    optim_type='mle', optim_opts={'max_inner_iters':1000, 'max_outer_iters': 30}
+)
+
+df14 = tf_result['table']
+df14 = df14[df14.NODE.str.match('^xsid_')].reset_index(drop=True)
+df14['FORTRAN_POST'] = legacy_result_df.RESULT
+df14['FORTRAN_RELDIFF'] = np.abs((df14['POST'] - df14['FORTRAN_POST']) / df14['POST'])
+
+with pd.ExcelWriter('sheets/scenario_14.xlsx') as writer:
+    df14[['NODE', 'REAC', 'DESCR', 'ENERGY', 'POST', 'FORTRAN_POST', 'FORTRAN_RELDIFF']].to_excel(writer, index=False)
 
