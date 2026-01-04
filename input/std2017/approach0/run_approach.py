@@ -121,6 +121,9 @@ def run_fortran_pipeline(root):
 
     (root / "03_reduction/DAT.INP").write_bytes(gawk_output)
 
+    shutil.copy(root / "03_reduction" / "DAT.INP",
+                root / "03_reduction_py" / "DAT.INP")
+
     # --------------------------------------------------------
     # Copy CRD file
     # --------------------------------------------------------
