@@ -1,9 +1,9 @@
 [submodule "neutron-standards-evaluation"]
 	path = deps/neutron-standards-evaluation
-	url = ../neutron-standards-evaluation/
+	url = https://github.com/iaea-nds/neutron-standards-evaluation
 [submodule "datpy"]
 	path = deps/datpy
-	url = ../../Development/codeproj/gitrepos/DATP-Python/
+	url = https://github.com/iaea-nds/DATP-Python
 [submodule "deps/datp-fortran"]
 	path = deps/datp-fortran
 	url = https://github.com/iaea-nds/datp-fortran
