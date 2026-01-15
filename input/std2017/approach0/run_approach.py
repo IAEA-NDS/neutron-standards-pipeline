@@ -43,15 +43,25 @@ def run_fortran_pipeline(root):
     root = Path(root).resolve()
     print(f"\n=== Running pipeline in root: {root} ===\n")
 
+    num_iters=30
+    num_inner_iters=10
+
+    num_inner_iters_str = '{:03d}'.format(num_inner_iters)
+
     # Directory setup
     dirs = [
-        "01_reduction",
-        "02_evaluation",
-        "03_reduction",
-        "03_reduction_py",
-        "04_evaluation",
-        "bin"
+        "001_reduction",
+        "002_evaluation",
     ]
+
+    for i in range(0, num_iters):
+        red_idx = '{:03d}'.format(i * 2 + 1)
+        eval_idx = '{:03d}'.format(i * 2 + 2)
+        dirs.append(f'{red_idx}_reduction')
+        dirs.append(f'{red_idx}_reduction_py')
+        dirs.append(f'{eval_idx}_evaluation')
+
+    dirs.append('bin')
     for d in dirs:
         (root / d).mkdir(parents=True, exist_ok=True)
 
@@ -76,30 +86,31 @@ def run_fortran_pipeline(root):
     # Copy initial input files into 01_reduction
     # --------------------------------------------------------
     shutil.copy(root / "../../input_std2017.crd",
-                root / "01_reduction/GMDATA.CRD")
+                root / "001_reduction/GMDATA.CRD")
 
     shutil.copy(root / "../../../input/DAT.INP",
-                root / "01_reduction/DAT.INP")
+                root / "001_reduction/DAT.INP")
 
     # --------------------------------------------------------
     # Run DATP in 01_reduction
     # --------------------------------------------------------
-    run(["../bin/datp"], cwd=root / "01_reduction")
+    run(["../bin/datp"], cwd=root / "001_reduction")
 
     # --------------------------------------------------------
     # Move results into 02_evaluation
     # --------------------------------------------------------
-    shutil.copy(root / "01_reduction/DAT.RES",
-                root / "02_evaluation/data.gma")
+    shutil.copy(root / "001_reduction/DAT.RES",
+                root / "002_evaluation/data.gma")
 
     # --------------------------------------------------------
     # Modify MODE line (sed -i equivalent)
     # --------------------------------------------------------
-    gma_path = root / "02_evaluation/data.gma"
+    gma_path = root / "002_evaluation/data.gma"
     lines = gma_path.read_text().splitlines()
 
     new_lines = [
-        "MODE     3    0    0    3    1    0    0    0"
+        # "MODE     3    0    0    3    1    0    0    0"
+        f"MODE     3    0    0  {num_inner_iters_str}    1    0    0    0"
         if l.startswith("MODE") else l
         for l in lines
     ]
@@ -108,63 +119,74 @@ def run_fortran_pipeline(root):
     # --------------------------------------------------------
     # Run GMAP in 02_evaluation
     # --------------------------------------------------------
-    run(["../bin/gmap"], cwd=root / "02_evaluation")
+    run(["../bin/gmap"], cwd=root / "002_evaluation")
 
-    # --------------------------------------------------------
-    # gawk transformation (manual redirection)
-    # --------------------------------------------------------
-    gawk_output = subprocess.check_output([
-        "gawk", "-f", str(root / "../../../replace_values.awk"),
-        str(root / "02_evaluation/gma.res"),
-        str(root / "01_reduction/DAT.INP")
-    ])
+    for i in range(1, num_iters):
 
-    (root / "03_reduction/DAT.INP").write_bytes(gawk_output)
+        print(f'Perform reduction iteration {i}...')
 
-    shutil.copy(root / "03_reduction" / "DAT.INP",
-                root / "03_reduction_py" / "DAT.INP")
+        old_red_idx = '{:03d}'.format((i-1) * 2 + 1)
+        old_eval_idx = '{:03d}'.format((i-1) * 2 + 2)
 
-    # --------------------------------------------------------
-    # Copy CRD file
-    # --------------------------------------------------------
-    shutil.copy(root / "01_reduction/GMDATA.CRD",
-                root / "03_reduction/GMDATA.CRD")
+        new_red_idx = '{:03d}'.format(i * 2 + 1)
+        new_eval_idx = '{:03d}'.format(i * 2 + 2)
 
-    shutil.copy(root / "01_reduction/GMDATA.CRD",
-                root / "03_reduction_py/GMDATA.CRD")
+        # --------------------------------------------------------
+        # gawk transformation (manual redirection)
+        # --------------------------------------------------------
+        gawk_output = subprocess.check_output([
+            "gawk", "-f", str(root / "../../../replace_values.awk"),
+            str(root / f"{old_eval_idx}_evaluation/gma.res"),
+            str(root / f"{old_red_idx}_reduction/DAT.INP")
+        ])
 
-    # --------------------------------------------------------
-    # Run DATP in 03_reduction
-    # --------------------------------------------------------
-    run(["../bin/datp"], cwd=root / "03_reduction")
+        (root / f"{new_red_idx}_reduction/DAT.INP").write_bytes(gawk_output)
 
-    # reduce with Python datpy code
-    run(["python", "-m", "datpy.datpy", "--legacy"], cwd= root / "03_reduction_py")
-    run(["python", "-m", "datpy.datpy", "--legacy", "--output", "../04_evaluation/data.json"], cwd= root / "03_reduction_py")
+        shutil.copy(root / f"{new_red_idx}_reduction" / "DAT.INP",
+                    root / f"{new_red_idx}_reduction_py" / "DAT.INP")
 
-    # --------------------------------------------------------
-    # Move results into 04_evaluation
-    # --------------------------------------------------------
-    shutil.copy(root / "03_reduction/DAT.RES",
-                root / "04_evaluation/data.gma")
+        # --------------------------------------------------------
+        # Copy CRD file
+        # --------------------------------------------------------
+        shutil.copy(root / f"{old_red_idx}_reduction/GMDATA.CRD",
+                    root / f"{new_red_idx}_reduction/GMDATA.CRD")
 
-    # --------------------------------------------------------
-    # Modify MODE line (sed -i equivalent)
-    # --------------------------------------------------------
-    gma_path = root / "04_evaluation/data.gma"
-    lines = gma_path.read_text().splitlines()
+        shutil.copy(root / f"{old_red_idx}_reduction/GMDATA.CRD",
+                    root / f"{new_red_idx}_reduction_py/GMDATA.CRD")
 
-    new_lines = [
-        "MODE     3    0    0    3    1    0    0    0"
-        if l.startswith("MODE") else l
-        for l in lines
-    ]
-    gma_path.write_text("\n".join(new_lines) + "\n")
+        # --------------------------------------------------------
+        # Run DATP in 03_reduction
+        # --------------------------------------------------------
+        run(["../bin/datp"], cwd=root / f"{new_red_idx}_reduction")
 
-    # --------------------------------------------------------
-    # Run GMAP in 04_evaluation
-    # --------------------------------------------------------
-    run(["../bin/gmap"], cwd=root / "04_evaluation")
+        # reduce with Python datpy code
+        run(["python", "-m", "datpy.datpy", "--legacy"], cwd= root / f"{new_red_idx}_reduction_py")
+        run(["python", "-m", "datpy.datpy", "--legacy", "--output", f"../{new_eval_idx}_evaluation/data.json"], cwd= root / f"{new_red_idx}_reduction_py")
+
+        # --------------------------------------------------------
+        # Move results into 04_evaluation
+        # --------------------------------------------------------
+        shutil.copy(root / f"{new_red_idx}_reduction/DAT.RES",
+                    root / f"{new_eval_idx}_evaluation/data.gma")
+
+        # --------------------------------------------------------
+        # Modify MODE line (sed -i equivalent)
+        # --------------------------------------------------------
+        gma_path = root / f"{new_eval_idx}_evaluation/data.gma"
+        lines = gma_path.read_text().splitlines()
+
+        new_lines = [
+            # "MODE     3    0    0    3    1    0    0    0"
+            f"MODE     3    0    0  {num_inner_iters_str}    1    0    0    0"
+            if l.startswith("MODE") else l
+            for l in lines
+        ]
+        gma_path.write_text("\n".join(new_lines) + "\n")
+
+        # --------------------------------------------------------
+        # Run GMAP in 04_evaluation
+        # --------------------------------------------------------
+        run(["../bin/gmap"], cwd=root / f"{new_eval_idx}_evaluation")
 
     print("\n=== Pipeline completed successfully ===\n")
 
